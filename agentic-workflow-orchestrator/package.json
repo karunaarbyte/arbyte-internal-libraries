@@ -1,0 +1,26 @@
+{
+  "name": "agentic-workflow-orchestrator",
+  "version": "0.0.1",
+  "description": "Agentic workflow orchestrator built on top of fsm-orchestrator.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^0.7.0",
+    "@slack/web-api": "^7.15.0",
+    "fsm-orchestrator": "file:../fsm-orchestrator",
+    "googleapis": "^171.4.0",
+    "hono": "^4.7.7",
+    "openai": "^4.97.0",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
