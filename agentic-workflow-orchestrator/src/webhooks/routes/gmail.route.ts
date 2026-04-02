@@ -10,7 +10,8 @@ import type { AgenticOrchestrator } from "../../orchestrator/AgenticOrchestrator
 // The decoded data contains: { emailAddress, historyId }
 // ─────────────────────────────────────────────────────────────
 
-const WORKFLOW_KEY = "gmail"; // matches WorkflowDefinition.trigger.source
+const TRIGGER_EVENT_KEY = "gmail.email_received";
+const _processedHistoryIds = new Set<string>();
 
 export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
   const route = new Hono();
@@ -44,29 +45,44 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
         history_id: emailData.historyId ?? "",
         message_id: message?.messageId ?? "",
         received_at: new Date().toISOString(),
+        slack_channel: process.env.SLACK_DEFAULT_CHANNEL ?? "",
       },
     };
 
     // ACK immediately, process async
-    c.executionCtx?.waitUntil(
-      (async () => {
-        try {
-          const workflow = orchestrator
-            .getWorkflows()
-            .find((w) => w.key.startsWith(WORKFLOW_KEY));
-
-          if (!workflow) {
-            console.warn(`[gmail.route] No workflow found for source "${WORKFLOW_KEY}"`);
-            return;
-          }
-
-          const task = orchestrator.initTask(workflow.key, event.payload);
-          await orchestrator.handleEvent(task.id, event);
-        } catch (err) {
-          console.error("[gmail.route] Event handling failed:", err);
+    (async () => {
+      try {
+        const historyId = String(emailData.historyId ?? "");
+        if (historyId && _processedHistoryIds.has(historyId)) {
+          console.log(`[gmail.route] Duplicate history_id "${historyId}" — ignoring`);
+          return;
         }
-      })()
-    );
+
+        const workflowKeys = await orchestrator.getWorkflowKeysByTrigger(TRIGGER_EVENT_KEY);
+
+        if (workflowKeys.length === 0) {
+          console.warn(`[gmail.route] No workflow found for trigger "${TRIGGER_EVENT_KEY}"`);
+          return;
+        }
+
+        const results = await Promise.allSettled(
+          workflowKeys.map(async (key) => {
+            const task = orchestrator.initTask(key, event.payload);
+            await orchestrator.handleEvent(task.id, event);
+          })
+        );
+
+        // Only mark processed if at least one workflow succeeded — failed ones remain retryable
+        const anySucceeded = results.some((r) => r.status === "fulfilled");
+        if (historyId && anySucceeded) {
+          _processedHistoryIds.add(historyId);
+          if (_processedHistoryIds.size > 500)
+            _processedHistoryIds.delete(_processedHistoryIds.values().next().value!);
+        }
+      } catch (err) {
+        console.error("[gmail.route] Event handling failed:", err);
+      }
+    })();
 
     return c.json({ received: true }, 200);
   });

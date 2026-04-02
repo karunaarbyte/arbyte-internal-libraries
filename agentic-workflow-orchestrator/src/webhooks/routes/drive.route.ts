@@ -20,10 +20,8 @@ export const buildDriveRoute = (watcher: DriveWatcher): Hono => {
     };
 
     // ACK immediately — Drive will retry if we don't respond within 10s
-    c.executionCtx?.waitUntil(
-      watcher.handleNotification(headers).catch((err) =>
-        console.error("[drive.route] Notification handling failed:", err)
-      )
+    watcher.handleNotification(headers).catch((err) =>
+      console.error("[drive.route] Notification handling failed:", err)
     );
 
     return c.json({ received: true }, 200);

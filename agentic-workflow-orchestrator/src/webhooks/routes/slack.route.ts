@@ -9,8 +9,6 @@ import type { AgenticOrchestrator } from "../../orchestrator/AgenticOrchestrator
 // All other events are normalized to IEvent and fired.
 // ─────────────────────────────────────────────────────────────
 
-const WORKFLOW_KEY = "slack";
-
 export const buildSlackRoute = (orchestrator: AgenticOrchestrator): Hono => {
   const route = new Hono();
 
@@ -47,25 +45,25 @@ export const buildSlackRoute = (orchestrator: AgenticOrchestrator): Hono => {
       },
     };
 
-    c.executionCtx?.waitUntil(
-      (async () => {
-        try {
-          const workflow = orchestrator
-            .getWorkflows()
-            .find((w) => w.key.startsWith(WORKFLOW_KEY));
+    (async () => {
+      try {
+        const workflowKeys = await orchestrator.getWorkflowKeysByTrigger(event.key);
 
-          if (!workflow) {
-            console.warn(`[slack.route] No workflow found for source "${WORKFLOW_KEY}"`);
-            return;
-          }
-
-          const task = orchestrator.initTask(workflow.key, event.payload);
-          await orchestrator.handleEvent(task.id, event);
-        } catch (err) {
-          console.error("[slack.route] Event handling failed:", err);
+        if (workflowKeys.length === 0) {
+          console.warn(`[slack.route] No workflow found for trigger "${event.key}"`);
+          return;
         }
-      })()
-    );
+
+        await Promise.allSettled(
+          workflowKeys.map(async (key) => {
+            const task = orchestrator.initTask(key, event.payload);
+            await orchestrator.handleEvent(task.id, event);
+          })
+        );
+      } catch (err) {
+        console.error("[slack.route] Event handling failed:", err);
+      }
+    })();
 
     return c.json({ received: true }, 200);
   });
