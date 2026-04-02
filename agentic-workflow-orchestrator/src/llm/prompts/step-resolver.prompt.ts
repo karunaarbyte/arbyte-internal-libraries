@@ -22,6 +22,7 @@ Return a single JSON object — no markdown, no explanation, just JSON:
 ## Rules
 - toolKey must be exactly one of the provided tool keys
 - args must only include values derivable from the state data or the event payload
+- If state.data.slack_channel is present, always use it as the channel arg for any Slack tool
 - If an arg value is unknown, omit it rather than guessing
 - Never return more than one tool
 `.trim();

@@ -121,7 +121,6 @@ export class LLMStepAction {
     }
 
     for (const transition of this._stepDef.transitions) {
-      if (result.emitEventKey && transition.onEvent !== result.emitEventKey) continue;
       if (!transition.condition) return transition;
       if (this._evaluateCondition(transition.condition, result.data ?? {})) return transition;
     }

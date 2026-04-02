@@ -35,10 +35,8 @@ export class LLMActionResolver {
       );
     }
 
-    // If only one tool is available, skip the LLM call entirely
-    if (candidateTools.length === 1) {
-      return { toolKey: candidateTools[0].key, args: {} };
-    }
+    // If only one tool is available, still call LLM to resolve args
+    // (skipping would pass empty args, causing required-field failures)
 
     const toolList = candidateTools
       .map((t) => `- ${t.key}: ${t.description}`)
