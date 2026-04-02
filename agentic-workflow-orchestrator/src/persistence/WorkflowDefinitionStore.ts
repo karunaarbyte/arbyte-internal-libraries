@@ -62,7 +62,7 @@ export class WorkflowDefinitionStore implements IWorkflowDefinitionStore {
     if (!existsSync(this._dir)) return [];
     const { readdirSync } = await import("fs");
     return readdirSync(this._dir)
-      .filter((f) => f.endsWith(".json"))
+      .filter((f) => f.endsWith(".json") && !f.startsWith("_"))
       .map((f) => f.replace(".json", ""));
   }
 
