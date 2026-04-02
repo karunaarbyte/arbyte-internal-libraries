@@ -20,14 +20,28 @@ export class LLMSkillParser {
     this._registry = registry;
   }
 
-  async parse(skillFileContent: string): Promise<WorkflowDefinition> {
+  // Canonical event keys emitted by webhook routes
+  private static readonly TRIGGER_EVENT_KEYS = [
+    "gmail.email_received",
+    "slack.message",
+    "slack.app_mention",
+    "drive.file_changed",
+    "manual_trigger",
+  ];
+
+  async parse(skillFileContent: string): Promise<WorkflowDefinition | null> {
     const availableToolKeys = this._registry.getAll().map((t) => t.key);
 
-    const response = await this._client.complete<WorkflowDefinition>({
-      systemPrompt: buildSkillCompilerPrompt(availableToolKeys),
+    const response = await this._client.complete<WorkflowDefinition & { error?: string }>({
+      systemPrompt: buildSkillCompilerPrompt(availableToolKeys, LLMSkillParser.TRIGGER_EVENT_KEYS),
       messages: [{ role: "user", content: skillFileContent }],
       jsonMode: true,
     });
+
+    if (response.data.error === "not_a_skill_file") {
+      console.warn("[LLMSkillParser] File is not a workflow skill description — skipping");
+      return null;
+    }
 
     this._validate(response.data);
 
