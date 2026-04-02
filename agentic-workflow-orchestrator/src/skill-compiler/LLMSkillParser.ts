@@ -56,6 +56,9 @@ export class LLMSkillParser {
       if (!Array.isArray(step.transitions))
         throw new Error(`[LLMSkillParser] Step "${step.key}" missing transitions`);
 
+      if (!Array.isArray(step.allowedTools))
+        throw new Error(`[LLMSkillParser] Step "${step.key}" allowedTools must be an array`);
+
       for (const toolKey of step.allowedTools) {
         if (!registeredToolKeys.has(toolKey))
           throw new Error(

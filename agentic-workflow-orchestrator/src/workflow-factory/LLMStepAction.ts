@@ -116,6 +116,10 @@ export class LLMStepAction {
   }
 
   private _selectTransition(result: IToolExecutionResult): TransitionDefinition {
+    if (this._stepDef.transitions.length === 0) {
+      return { onEvent: `step.${this._stepDef.key}.complete`, nextStep: "end" };
+    }
+
     for (const transition of this._stepDef.transitions) {
       if (result.emitEventKey && transition.onEvent !== result.emitEventKey) continue;
       if (!transition.condition) return transition;

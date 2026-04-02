@@ -82,7 +82,10 @@ export class AgenticOrchestrator extends Orchestrator {
 
   async loadAllWorkflows(): Promise<void> {
     const ids = await this._definitionStore.getAllWorkflowIds();
-    await Promise.all(ids.map((id) => this.reloadWorkflow(id)));
-    console.log(`[AgenticOrchestrator] Loaded ${ids.length} workflow(s) from store`);
+    const results = await Promise.allSettled(ids.map((id) => this.reloadWorkflow(id)));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0)
+      console.warn(`[AgenticOrchestrator] ${failed}/${ids.length} workflow(s) failed to load`);
+    console.log(`[AgenticOrchestrator] Loaded ${ids.length - failed}/${ids.length} workflow(s) from store`);
   }
 }

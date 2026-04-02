@@ -32,13 +32,19 @@ export class WorkflowDefinitionStore implements IWorkflowDefinitionStore {
     const versions = await this.getAll(envelope.definition.id);
     const existing = versions.findIndex((v) => v.version === envelope.version);
 
+    const updated = versions.map((v) =>
+      envelope.status === "active" && v.version !== envelope.version
+        ? { ...v, status: "backup" as const }
+        : v
+    );
+
     if (existing >= 0) {
-      versions[existing] = envelope;
+      updated[existing] = envelope;
     } else {
-      versions.push(envelope);
+      updated.push(envelope);
     }
 
-    this._write(envelope.definition.id, versions);
+    this._write(envelope.definition.id, updated);
   }
 
   async getActive(
