@@ -10,7 +10,7 @@ import {
   DriveWriteFileAction,
   DriveListFilesAction,
 } from "./tools";
-import { ClaudeClient } from "./llm/providers";
+import { OpenAIClient } from "./llm/providers";
 import { LLMActionResolver } from "./llm/LLMActionResolver";
 import { LLMSkillParser } from "./skill-compiler/LLMSkillParser";
 import { SkillCompiler } from "./skill-compiler/SkillCompiler";
@@ -23,9 +23,13 @@ import {
   InvocationLogStore,
 } from "./persistence";
 import { buildWebhookServer, startServer } from "./webhooks";
+import { google } from "googleapis";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const WORKFLOW_STORAGE_DIR = process.env.WORKFLOW_STORAGE_DIR ?? "./.workflow-store";
+const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL ?? "";
+const DRIVE_SKILLS_FOLDER_ID = process.env.DRIVE_SKILLS_FOLDER_ID ?? "";
+const GMAIL_PUBSUB_TOPIC = process.env.GMAIL_PUBSUB_TOPIC ?? "";
 
 // ── Tool registry ─────────────────────────────────────────────
 
@@ -44,8 +48,8 @@ registry.register(new DriveListFilesAction());
 // ── LLM clients ───────────────────────────────────────────────
 // skill compiler: opus (quality) | step resolver: sonnet (cost)
 
-const compilerLLM = new ClaudeClient({ model: "claude-opus-4-6" });
-const resolverLLM = new ClaudeClient({ model: "claude-sonnet-4-6" });
+const compilerLLM = new OpenAIClient({ model: "gpt-4o" });
+const resolverLLM = new OpenAIClient({ model: "gpt-4o-mini" });
 
 // ── Core services ─────────────────────────────────────────────
 
@@ -72,7 +76,7 @@ const compiler = new SkillCompiler(
   (workflowId) => orchestrator.reloadWorkflow(workflowId)
 );
 
-const driveWatcher = new DriveWatcher(compiler);
+const driveWatcher = new DriveWatcher(compiler, WORKFLOW_STORAGE_DIR);
 
 // ── Boot ──────────────────────────────────────────────────────
 
@@ -81,6 +85,33 @@ async function boot(): Promise<void> {
 
   const app = buildWebhookServer({ orchestrator, driveWatcher });
   startServer(app, PORT);
+
+  if (DRIVE_SKILLS_FOLDER_ID && WEBHOOK_BASE_URL) {
+    try {
+      await driveWatcher.watchFolder(DRIVE_SKILLS_FOLDER_ID, WEBHOOK_BASE_URL);
+    } catch (err) {
+      console.error("[boot] Drive watcher setup failed:", err);
+    }
+  } else {
+    console.warn("[boot] DRIVE_SKILLS_FOLDER_ID or WEBHOOK_BASE_URL not set — Drive watching disabled");
+  }
+
+  if (GMAIL_PUBSUB_TOPIC) {
+    try {
+      const { getGoogleAuthClient } = await import("./lib/google-auth");
+      const gmail = google.gmail({ version: "v1", auth: getGoogleAuthClient() });
+      const res = await gmail.users.watch({
+        userId: "me",
+        requestBody: { topicName: GMAIL_PUBSUB_TOPIC, labelIds: ["INBOX"] },
+      });
+      const expiresAt = res.data.expiration ? new Date(Number(res.data.expiration)).toISOString() : "unknown";
+      console.log(`[boot] Gmail watch registered — historyId: ${res.data.historyId}, expires: ${expiresAt}`);
+    } catch (err) {
+      console.error("[boot] Failed to register Gmail watch:", err);
+    }
+  } else {
+    console.warn("[boot] GMAIL_PUBSUB_TOPIC not set — Gmail webhook disabled");
+  }
 }
 
 boot().catch((err) => {

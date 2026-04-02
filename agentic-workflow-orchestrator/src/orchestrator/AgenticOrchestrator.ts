@@ -78,6 +78,18 @@ export class AgenticOrchestrator extends Orchestrator {
     }
   }
 
+  // Returns workflow keys whose active definition triggers on the given eventKey
+  async getWorkflowKeysByTrigger(eventKey: string): Promise<string[]> {
+    const ids = await this._definitionStore.getAllWorkflowIds();
+    const results = await Promise.all(
+      ids.map(async (id) => {
+        const active = await this._definitionStore.getActive(id);
+        return active?.definition.trigger.eventKey === eventKey ? id : null;
+      })
+    );
+    return results.filter((id): id is string => id !== null);
+  }
+
   // ── Boot helper ───────────────────────────────────────────
 
   async loadAllWorkflows(): Promise<void> {

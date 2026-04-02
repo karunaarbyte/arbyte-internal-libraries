@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "tsc",
-    "test": "bun test"
+    "test": "bun test",
+    "get-google-token": "bun run scripts/get-google-token.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
