@@ -20,6 +20,7 @@ export type LLMRequest = {
   messages: LLMMessage[];
   // Hint to the provider that the response must be valid JSON
   jsonMode: true;
+  temperature?: number;
 };
 
 export type LLMResponse<T> = {

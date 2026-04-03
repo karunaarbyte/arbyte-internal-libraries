@@ -56,6 +56,35 @@ function buildStateContext(
   return out;
 }
 
+// Build a tool description block for the resolver prompt.
+// When inputSchema is declared, renders a structured contract with explicit arg sources.
+// Falls back to the description string for tools without a schema.
+function buildToolBlock(tool: ToolAction): string {
+  if (!tool.inputSchema || tool.inputSchema.length === 0) {
+    return `${tool.key}: ${tool.description}`;
+  }
+
+  const argLines = tool.inputSchema.map((def) => {
+    const req = def.required ? "required" : "optional";
+    let source: string;
+    if (def.source === "state") {
+      const keys = def.stateKeys ?? [def.name];
+      source = `from state.data.${keys.join(" or state.data.")}`;
+    } else if (def.source === "params") {
+      source = "from step params (compile-time constant — do not generate)";
+    } else {
+      source = "generate from step description and state context";
+    }
+    return `    - ${def.name} (${req}, ${source}): ${def.description}`;
+  });
+
+  const outputLine = tool.outputFields && tool.outputFields.length > 0
+    ? `\n  Writes to state: ${tool.outputFields.join(", ")}`
+    : "";
+
+  return `${tool.key}\n  Inputs:\n${argLines.join("\n")}${outputLine}`;
+}
+
 export class LLMActionResolver {
   private readonly _client: ILLMClient;
 
@@ -80,12 +109,12 @@ export class LLMActionResolver {
     // Fast path: tool is already known — only ask LLM for args.
     // Saves ~40% tokens vs the full resolver prompt (no tool list, no selection logic).
     if (candidateTools.length === 1) {
-      return this._resolveArgs(stepDescription, stateContext, candidateTools[0]);
+      return this._resolveArgs(stepDescription, stateContext, candidateTools[0]!);
     }
 
     const toolList = candidateTools
-      .map((t) => `- ${t.key}: ${t.description}`)
-      .join("\n");
+      .map((t) => buildToolBlock(t))
+      .join("\n\n");
 
     const userPrompt = `
 Step: ${stepDescription}
@@ -127,8 +156,8 @@ Step: ${stepDescription}
 Current state:
 ${JSON.stringify(stateContext, null, 2)}
 
-Tool: ${tool.key}
-${tool.description}
+Tool:
+${buildToolBlock(tool)}
     `.trim();
 
     const response = await this._client.complete<{ args: Record<string, unknown> }>({

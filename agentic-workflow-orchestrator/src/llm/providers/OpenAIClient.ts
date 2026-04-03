@@ -17,12 +17,14 @@ export type OpenAIModel =
 export type OpenAIClientOptions = {
   model: OpenAIModel;
   maxTokens?: number;
+  temperature?: number;
 };
 
 export class OpenAIClient implements ILLMClient {
   private readonly _client: OpenAI;
   private readonly _model: OpenAIModel;
   private readonly _maxTokens: number;
+  private readonly _temperature?: number;
 
   constructor(options: OpenAIClientOptions) {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -31,12 +33,14 @@ export class OpenAIClient implements ILLMClient {
     this._client = new OpenAI({ apiKey });
     this._model = options.model;
     this._maxTokens = options.maxTokens ?? 4096;
+    this._temperature = options.temperature;
   }
 
   async complete<T>(request: LLMRequest): Promise<LLMResponse<T>> {
     const response = await this._client.chat.completions.create({
       model: this._model,
       max_tokens: this._maxTokens,
+      temperature: request.temperature ?? this._temperature,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: request.systemPrompt },
