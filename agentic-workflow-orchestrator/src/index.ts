@@ -6,9 +6,11 @@ import {
   SlackSendMessageAction,
   SlackReadChannelAction,
   SlackReplyThreadAction,
+  SlackSendApprovalRequestAction,
   DriveReadFileAction,
   DriveWriteFileAction,
   DriveListFilesAction,
+  DraftTextAction,
 } from "./tools";
 import { OpenAIClient } from "./llm/providers";
 import { LLMActionResolver } from "./llm/LLMActionResolver";
@@ -22,6 +24,7 @@ import {
   TaskStateStore,
   InvocationLogStore,
 } from "./persistence";
+import { UsageLogger } from "./persistence/UsageLogger";
 import { buildWebhookServer, startServer } from "./webhooks";
 import { google } from "googleapis";
 
@@ -44,22 +47,24 @@ registry.register(new SlackReplyThreadAction());
 registry.register(new DriveReadFileAction());
 registry.register(new DriveWriteFileAction());
 registry.register(new DriveListFilesAction());
+registry.register(new DraftTextAction());
+registry.register(new SlackSendApprovalRequestAction());
 
 // ── LLM clients ───────────────────────────────────────────────
-// skill compiler: opus (quality) | step resolver: sonnet (cost)
+// skill compiler: gpt-4o (quality) | step resolver: gpt-4o-mini (cost)
 
 const compilerLLM = new OpenAIClient({ model: "gpt-4o" });
 const resolverLLM = new OpenAIClient({ model: "gpt-4o-mini" });
 
 // ── Core services ─────────────────────────────────────────────
 
+const usageLogger = new UsageLogger(`${WORKFLOW_STORAGE_DIR}/usage-log.json`);
 const resolver = new LLMActionResolver(resolverLLM);
-const factory = new WorkflowFactory(registry, resolver);
+const factory = new WorkflowFactory(registry, resolver, usageLogger);
 
 const definitionStore = new WorkflowDefinitionStore(WORKFLOW_STORAGE_DIR);
 const taskStore = new TaskStateStore();
 const logStore = new InvocationLogStore();
-
 const orchestrator = new AgenticOrchestrator(
   definitionStore,
   taskStore,
@@ -102,7 +107,11 @@ async function boot(): Promise<void> {
       const gmail = google.gmail({ version: "v1", auth: getGoogleAuthClient() });
       const res = await gmail.users.watch({
         userId: "me",
-        requestBody: { topicName: GMAIL_PUBSUB_TOPIC, labelIds: ["INBOX"] },
+        requestBody: {
+          topicName: GMAIL_PUBSUB_TOPIC,
+          labelIds: ["INBOX"],
+          labelFilterBehavior: "INCLUDE",
+        },
       });
       const expiresAt = res.data.expiration ? new Date(Number(res.data.expiration)).toISOString() : "unknown";
       console.log(`[boot] Gmail watch registered — historyId: ${res.data.historyId}, expires: ${expiresAt}`);

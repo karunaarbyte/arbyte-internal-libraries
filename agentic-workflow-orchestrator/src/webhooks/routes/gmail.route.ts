@@ -41,7 +41,6 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
     const event = {
       key: "gmail.email_received",
       payload: {
-        email_address: emailData.emailAddress ?? "",
         history_id: emailData.historyId ?? "",
         message_id: message?.messageId ?? "",
         received_at: new Date().toISOString(),
@@ -49,15 +48,25 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
       },
     };
 
+    // Dedup synchronously before ACKing — prevents two near-simultaneous Pub/Sub
+    // deliveries of the same historyId both slipping through before either completes.
+    // Trade-off: if some workflows succeed and others fail, the historyId stays locked
+    // and the failed workflows won't be retried. Acceptable because per-message dedup
+    // in GmailReadAction provides a second layer of protection.
+    const historyId = String(emailData.historyId ?? "");
+    if (historyId && _processedHistoryIds.has(historyId)) {
+      console.log(`[gmail.route] Duplicate history_id "${historyId}" — ignoring`);
+      return c.json({ received: true }, 200);
+    }
+    if (historyId) {
+      _processedHistoryIds.add(historyId);
+      if (_processedHistoryIds.size > 500)
+        _processedHistoryIds.delete(_processedHistoryIds.values().next().value!);
+    }
+
     // ACK immediately, process async
     (async () => {
       try {
-        const historyId = String(emailData.historyId ?? "");
-        if (historyId && _processedHistoryIds.has(historyId)) {
-          console.log(`[gmail.route] Duplicate history_id "${historyId}" — ignoring`);
-          return;
-        }
-
         const workflowKeys = await orchestrator.getWorkflowKeysByTrigger(TRIGGER_EVENT_KEY);
 
         if (workflowKeys.length === 0) {
@@ -72,15 +81,14 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
           })
         );
 
-        // Only mark processed if at least one workflow succeeded — failed ones remain retryable
         const anySucceeded = results.some((r) => r.status === "fulfilled");
-        if (historyId && anySucceeded) {
-          _processedHistoryIds.add(historyId);
-          if (_processedHistoryIds.size > 500)
-            _processedHistoryIds.delete(_processedHistoryIds.values().next().value!);
+        if (historyId && !anySucceeded) {
+          _processedHistoryIds.delete(historyId);
         }
       } catch (err) {
         console.error("[gmail.route] Event handling failed:", err);
+        // Unexpected exception — release the lock so Pub/Sub retries are not permanently dropped
+        if (historyId) _processedHistoryIds.delete(historyId);
       }
     })();
 
