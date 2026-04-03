@@ -39,6 +39,9 @@ export type StepDefinition = {
   // Optional: pin the tool to use at this step — skips LLM resolver entirely.
   // Set by the compiler when there is no runtime ambiguity (deterministic step).
   toolKey?: string;
+  // Static args baked in at compile time — merged into tool args before execution.
+  // Use for values known at compile time (e.g. folder_id from a Drive URL in the skill).
+  params?: Record<string, unknown>;
   // State contract — keys this step reads from state.data and writes to state.data.
   // Used by WorkflowFactory to validate handoffs between steps at build time.
   reads?: string[];
