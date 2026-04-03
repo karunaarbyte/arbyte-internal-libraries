@@ -4,6 +4,7 @@ import type { IActionLogData } from "fsm-orchestrator/src/types/logs";
 import type { StepDefinition, TransitionDefinition, TransitionCondition, IToolExecutionResult } from "../types";
 import type { IToolRegistry } from "../tools/registry";
 import type { LLMActionResolver } from "../llm/LLMActionResolver";
+import type { UsageLogger } from "../persistence/UsageLogger";
 
 // ─────────────────────────────────────────────────────────────
 // LLMStepAction — produces an FSM Action for a single workflow step.
@@ -24,28 +25,38 @@ export const stepTriggerEvent = (stepKey: string): string =>
 
 export class LLMStepAction {
   private readonly _stepDef: StepDefinition;
+  private readonly _workflowId: string;
   private readonly _registry: IToolRegistry;
   private readonly _resolver: LLMActionResolver;
+  private readonly _usageLogger?: UsageLogger;
 
   constructor(
     stepDef: StepDefinition,
+    workflowId: string,
     registry: IToolRegistry,
-    resolver: LLMActionResolver
+    resolver: LLMActionResolver,
+    usageLogger?: UsageLogger
   ) {
     this._stepDef = stepDef;
+    this._workflowId = workflowId;
     this._registry = registry;
     this._resolver = resolver;
+    this._usageLogger = usageLogger;
   }
 
-  buildAction(): Action {
+  // triggerFromStateKey: when this action is reached via an external event (e.g.
+  // slack.approval_granted) from a different step, pass that source step's key so
+  // canBeInvoked matches the state the task is actually in when the event arrives.
+  buildAction(actionKey: string, triggerFromStateKey?: string): Action {
     const stepDef = this._stepDef;
     const isTerminal = stepDef.transitions.every((t) => t.nextStep === "end");
+    const validStateKey = triggerFromStateKey ?? stepDef.key;
 
     return new Action(
-      `step.${stepDef.key}`,
+      actionKey,
       stepDef.description,
       (state: IState) => ({
-        can: state.key === stepDef.key,
+        can: state.key === validStateKey,
         description: stepDef.description,
       }),
       (state: IState) => this._invoke(state),
@@ -70,11 +81,20 @@ export class LLMStepAction {
       };
     }
 
-    const { toolKey, args } = await this._resolver.resolve({
+    const { toolKey, args, inputTokens, outputTokens } = await this._resolver.resolve({
       stepDescription: this._stepDef.description,
       state,
-      eventPayload: state.data as Record<string, unknown>,
       candidateTools,
+    });
+
+    // Log tokens for every resolver call regardless of what happens next
+    this._usageLogger?.append({
+      timestamp: new Date().toISOString(),
+      workflowId: this._workflowId,
+      stepKey: this._stepDef.key,
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
     });
 
     const tool = this._registry.get(toolKey);
@@ -98,20 +118,34 @@ export class LLMStepAction {
       };
     }
 
+    const mergedData = { ...state.data, ...toolResult.data, task_id: state.data.task_id };
+
+    // Externally-gated step: ALL transitions wait for external events (e.g. slack.approval_granted).
+    // Do NOT pre-advance state — the task stays at the current step key so that when the
+    // external event arrives, the correct transition branch (granted vs rejected) can fire.
+    const isExternallyGated =
+      this._stepDef.transitions.length > 0 &&
+      this._stepDef.transitions.every((t) => t.onEvent !== stepTriggerEvent(this._stepDef.key));
+
+    if (isExternallyGated) {
+      return {
+        success: true,
+        message: toolResult.message,
+        data: toolResult.data as Record<string, any> | undefined,
+        cost: toolResult.cost ?? 1,
+        new_state: { key: state.key, data: mergedData },
+      };
+    }
+
     const transition = this._selectTransition(toolResult);
     const nextStateKey = transition.nextStep === "end" ? "end" : transition.nextStep;
-
-    const newState: IState = {
-      key: nextStateKey,
-      data: { ...state.data, ...toolResult.data },
-    };
 
     return {
       success: true,
       message: toolResult.message,
       data: toolResult.data as Record<string, any> | undefined,
       cost: toolResult.cost ?? 1,
-      new_state: newState,
+      new_state: { key: nextStateKey, data: mergedData },
     };
   }
 
