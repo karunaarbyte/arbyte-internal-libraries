@@ -14,4 +14,6 @@ export type IToolExecutionResult = {
 export type LLMToolChoice = {
   toolKey: string;
   args: Record<string, unknown>;
+  inputTokens: number;
+  outputTokens: number;
 };
