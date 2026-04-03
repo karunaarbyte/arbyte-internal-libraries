@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import type { IState } from "fsm-orchestrator";
-import { ToolAction } from "../base";
+import { ToolAction, fromState, stripTrailingSignature } from "../base";
 import type { IToolExecutionResult } from "../../types";
 import { getGoogleAuthClient } from "../../lib/google-auth";
 
@@ -60,6 +60,10 @@ const extractHeader = (
 
 // ── GmailReadAction ───────────────────────────────────────────
 
+// Dedup at message level — historyId dedup in the route isn't sufficient because
+// Gmail Pub/Sub can emit multiple notifications with different historyIds for the same email.
+const _processedMessageIds = new Set<string>();
+
 export class GmailReadAction extends ToolAction {
   readonly key = "gmail.read";
   readonly description =
@@ -103,16 +107,42 @@ export class GmailReadAction extends ToolAction {
       return { success: false, message: "No unread messages found", cost: 1 };
     }
 
-    const msgRes = await gmail.users.messages.get({
-      userId: "me",
-      id: messageId,
-      format: "full",
-    });
+    if (_processedMessageIds.has(messageId)) {
+      console.log(`[GmailReadAction] Message "${messageId}" already processed — skipping`);
+      return { success: false, message: "Message already processed", cost: 0 };
+    }
+
+    // Mark before fetch so concurrent re-deliveries don't both call messages.get.
+    // On transient failure we remove it so the next delivery can retry.
+    _processedMessageIds.add(messageId);
+    if (_processedMessageIds.size > 500)
+      _processedMessageIds.delete(_processedMessageIds.values().next().value!);
+
+    let msgRes: Awaited<ReturnType<typeof gmail.users.messages.get>>;
+    try {
+      msgRes = await gmail.users.messages.get({
+        userId: "me",
+        id: messageId,
+        format: "full",
+      });
+    } catch (err) {
+      // Transient error — remove from dedup set so the next Pub/Sub delivery can retry
+      _processedMessageIds.delete(messageId);
+      throw err;
+    }
 
     const headers = msgRes.data.payload?.headers ?? [];
     const from = extractHeader(headers, "from");
     const subject = extractHeader(headers, "subject");
     const date = extractHeader(headers, "date");
+
+    // Loop guard — skip emails sent from the authenticated account itself
+    const ownEmail = process.env.GMAIL_USER_EMAIL ?? "";
+    if (ownEmail && from.includes(ownEmail)) {
+      console.log(`[GmailReadAction] Email from self (${from}) — skipping to prevent loop`);
+      // Keep in processed set — self-sent messages should never trigger the workflow
+      return { success: false, message: "Email from self — skipped", cost: 0 };
+    }
 
     // Extract body — check parts for text/plain first, fallback to snippet
     let body = msgRes.data.snippet ?? "";
@@ -150,11 +180,13 @@ export class GmailSendAction extends ToolAction {
 
   async execute(
     args: Record<string, unknown>,
-    _state: IState
+    state: IState
   ): Promise<IToolExecutionResult> {
     const to = args.to as string;
     const subject = args.subject as string;
-    const body = args.body as string;
+    // Prefer state draft (full) over LLM arg (may be truncated by resolver context)
+    const draftBody = fromState(state, ["reply_body", "draft_body", "draft", "email_body"], args.body);
+    const body = draftBody ? stripTrailingSignature(draftBody) : draftBody;
 
     if (!to || !subject || !body) {
       return { success: false, message: "Missing required args: to, subject, body", cost: 0 };
@@ -196,7 +228,14 @@ export class GmailReplyAction extends ToolAction {
     state: IState
   ): Promise<IToolExecutionResult> {
     const messageId = (args.message_id ?? state.data.message_id) as string;
-    const body = args.body as string;
+    const approvedBy = (state.data.approved_by ?? args.approved_by) as string | undefined;
+    // Prefer state draft (full) over LLM arg (may be truncated by resolver context)
+    const draftBody = fromState(state, ["reply_body", "draft_body", "draft", "email_body"], args.body);
+    // Strip any sign-off the LLM included, then append the authoritative signature
+    const cleanBody = draftBody ? stripTrailingSignature(draftBody) : draftBody;
+    const body = approvedBy && cleanBody
+      ? `${cleanBody}\n\nBest,\n${approvedBy}`
+      : cleanBody;
 
     if (!messageId || !body) {
       return { success: false, message: "Missing required args: message_id, body", cost: 0 };

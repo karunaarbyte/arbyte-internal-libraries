@@ -1,1 +1,1 @@
-export { SlackSendMessageAction, SlackReadChannelAction, SlackReplyThreadAction } from "./SlackTools";
+export { SlackSendMessageAction, SlackReadChannelAction, SlackReplyThreadAction, SlackSendApprovalRequestAction } from "./SlackTools";
