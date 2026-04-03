@@ -48,22 +48,33 @@ Return a single JSON object matching this exact structure — no markdown, no ex
 - Every step key must be unique within the workflow
 - initialStep must match one of the step keys exactly
 - Every transition's nextStep must match a step key or be the string "end"
-- Only include tools in allowedTools that are relevant to that specific step
-- EVERY step MUST have at least one tool in allowedTools — steps with empty allowedTools are invalid and will break execution
+- EVERY step MUST have exactly one tool in allowedTools. Only add a second tool if the choice between them genuinely depends on runtime data that cannot be known at compile time (e.g. send via Gmail OR Slack depending on a condition). Never add a second tool "just in case".
 - For transitions triggered by step completion, onEvent MUST be "step.<current_step_key>.complete"
 - For transitions triggered by external events (e.g. user approval), onEvent must be one of the available trigger event keys (slack.approval_granted, slack.approval_rejected, etc.)
 - If a step can branch (e.g. success vs failure), add multiple transitions with conditions:
   {
     "onEvent": "step.<current_step_key>.complete",
-    "condition": { "field": "data.<field>", "operator": "eq", "value": true },
+    "condition": { "field": "<field_key>", "operator": "eq", "value": true },
     "nextStep": "<step_key>"
   }
-- Keep step descriptions concise and action-oriented
 - If the input is not a workflow automation description, respond with: {"error": "not_a_skill_file"}
 
-## Tool usage guidance
-- Use core.draft_text when you need to generate AND store text (reply body, summaries, decisions). The step description should tell the LLM resolver exactly what to draft and what fields to store (e.g. "Draft a reply and store as reply_body. Also evaluate if the email is critical and store is_critical as true or false.")
-- Use core.draft_text to fold in any classification or decision that has no dedicated tool — do not create a separate step with empty allowedTools for this
-- Use slack.send_approval_request when a human needs to approve an action before it proceeds. You MUST include a core.draft_text step immediately before it — the draft step stores the email body as "reply_body", and the approval step's description must say to pass that draft as draft_body. The next step after send_approval_request should transition on slack.approval_granted or slack.approval_rejected — NOT on step.X.complete
-- Do NOT create "wait" steps or "check" steps with empty allowedTools — fold that logic into an adjacent step's description instead
+## Step descriptions
+The description field is the ONLY instruction the runtime resolver receives. It must be self-contained and precise — the resolver has no other context. Write descriptions that:
+- State the action in imperative mood ("Read the incoming email", "Send a Slack message to…")
+- Name the exact state keys to read from (e.g. "use state.body for the email content") when the step consumes data from a prior step
+- Name the exact state key to store output under when the step produces data (e.g. "store the drafted reply as reply_body")
+- For core.draft_text steps: include both what to draft AND the draft_key to store it under, e.g. "Draft a professional reply to the email. Store as reply_body."
+- For classification/decision steps: include the output key and the values, e.g. "Classify if the email is urgent. Store result as is_urgent (true or false)."
+- Keep descriptions under 2 sentences — if you need more, split into two steps
+
+## Tool selection rules
+Follow these rules in order:
+
+1. **Reading external data** → use the source-specific read tool (gmail.read, slack.read_channel, drive.read_file)
+2. **Generating or drafting text** (reply body, summary, classification, decision) → always use core.draft_text. Never put drafting logic in a send step's description.
+3. **Sending a message or reply** → use the appropriate send tool (gmail.send, gmail.reply, slack.send_message, slack.reply_thread). The send step description should reference the state key where the draft was stored, not ask the resolver to re-draft.
+4. **Human approval gate** → use slack.send_approval_request. MUST be preceded by a core.draft_text step that stores the draft as reply_body. The approval step description must say "pass reply_body as draft_body". Transitions on slack.approval_granted / slack.approval_rejected, NOT step.X.complete.
+5. **Writing to storage** → use the appropriate write tool (drive.write_file, etc.)
+6. **Anything that has no matching tool** → fold into an adjacent core.draft_text step's description. Never create a step for it alone.
 `.trim();
