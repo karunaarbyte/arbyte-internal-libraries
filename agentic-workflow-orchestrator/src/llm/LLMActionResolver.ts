@@ -3,6 +3,7 @@ import type { ILLMClient } from "./base";
 import type { ToolAction } from "../tools/base";
 import type { LLMToolChoice } from "../types";
 import { STEP_RESOLVER_PROMPT } from "./prompts/step-resolver.prompt";
+import { STEP_ARGS_PROMPT } from "./prompts/step-args.prompt";
 
 // ─────────────────────────────────────────────────────────────
 // LLMActionResolver — resolves which tool to call at a given step.
@@ -71,17 +72,20 @@ export class LLMActionResolver {
       );
     }
 
-    // If only one tool is available, still call LLM to resolve args
-    // (skipping would pass empty args, causing required-field failures)
-
-    const toolList = candidateTools
-      .map((t) => `- ${t.key}: ${t.description}`)
-      .join("\n");
-
     const stateContext = buildStateContext(
       state.data as Record<string, unknown>,
       candidateTools.map((t) => t.key)
     );
+
+    // Fast path: tool is already known — only ask LLM for args.
+    // Saves ~40% tokens vs the full resolver prompt (no tool list, no selection logic).
+    if (candidateTools.length === 1) {
+      return this._resolveArgs(stepDescription, stateContext, candidateTools[0]);
+    }
+
+    const toolList = candidateTools
+      .map((t) => `- ${t.key}: ${t.description}`)
+      .join("\n");
 
     const userPrompt = `
 Step: ${stepDescription}
@@ -110,5 +114,34 @@ ${toolList}
     }
 
     return { toolKey, args, inputTokens: response.inputTokens, outputTokens: response.outputTokens };
+  }
+
+  private async _resolveArgs(
+    stepDescription: string,
+    stateContext: Record<string, unknown>,
+    tool: ToolAction
+  ): Promise<LLMToolChoice> {
+    const userPrompt = `
+Step: ${stepDescription}
+
+Current state:
+${JSON.stringify(stateContext, null, 2)}
+
+Tool: ${tool.key}
+${tool.description}
+    `.trim();
+
+    const response = await this._client.complete<{ args: Record<string, unknown> }>({
+      systemPrompt: STEP_ARGS_PROMPT,
+      messages: [{ role: "user", content: userPrompt }],
+      jsonMode: true,
+    });
+
+    return {
+      toolKey: tool.key,
+      args: response.data.args ?? {},
+      inputTokens: response.inputTokens,
+      outputTokens: response.outputTokens,
+    };
   }
 }
