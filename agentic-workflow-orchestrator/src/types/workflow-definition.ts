@@ -36,6 +36,13 @@ export type StepDefinition = {
   key: string; // maps 1:1 to IState.key in fsm-orchestrator
   description: string;
   allowedTools: string[]; // tool keys from ToolRegistry
+  // Optional: pin the tool to use at this step — skips LLM resolver entirely.
+  // Set by the compiler when there is no runtime ambiguity (deterministic step).
+  toolKey?: string;
+  // State contract — keys this step reads from state.data and writes to state.data.
+  // Used by WorkflowFactory to validate handoffs between steps at build time.
+  reads?: string[];
+  writes?: string[];
   transitions: TransitionDefinition[];
 };
 
