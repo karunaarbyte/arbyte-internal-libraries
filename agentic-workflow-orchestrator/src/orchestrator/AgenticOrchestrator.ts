@@ -76,6 +76,7 @@ export class AgenticOrchestrator extends Orchestrator {
   public async handleEvent(taskId: string, event: IEvent): Promise<IInvocationLog[]> {
     const task = this.getTask(taskId);
     if (!task) {
+      console.error(`[AgenticOrchestrator] handleEvent: task "${taskId}" not found`);
       return [{
         success: false,
         message: `Task '${taskId}' not found`,
@@ -90,6 +91,7 @@ export class AgenticOrchestrator extends Orchestrator {
     if (!taskWorkflow) {
       const active = await this._definitionStore.getActive(task.workflowKey);
       if (!active) {
+        console.error(`[AgenticOrchestrator] handleEvent: no active definition for workflow "${task.workflowKey}" — compile a skill first`);
         return [{
           success: false,
           message: `No active definition for workflow '${task.workflowKey}'`,
@@ -106,8 +108,13 @@ export class AgenticOrchestrator extends Orchestrator {
     const stateWithPayload = event.payload && Object.keys(event.payload).length > 0
       ? { ...task.state, data: { ...task.state.data, ...event.payload } }
       : task.state;
+    console.log(`[AgenticOrchestrator] task="${taskId}" event="${event.key}" state="${task.state.key}"`);
     taskWorkflow.setState(stateWithPayload);
     const result = await taskWorkflow.handleEvent(event, this.messenger);
+
+    if (!result.success) {
+      console.error(`[AgenticOrchestrator] task="${taskId}" event="${event.key}" failed: ${result.message}`);
+    }
 
     if (result.success) {
       task.state = result.new_state ?? task.state;

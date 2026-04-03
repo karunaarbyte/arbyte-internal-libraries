@@ -68,18 +68,30 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
     (async () => {
       try {
         const workflowKeys = await orchestrator.getWorkflowKeysByTrigger(TRIGGER_EVENT_KEY);
+        console.log(`[gmail.route] historyId=${historyId} — matched workflows: [${workflowKeys.join(", ") || "none"}]`);
 
         if (workflowKeys.length === 0) {
-          console.warn(`[gmail.route] No workflow found for trigger "${TRIGGER_EVENT_KEY}"`);
+          console.warn(`[gmail.route] No active workflow found for trigger "${TRIGGER_EVENT_KEY}" — is a skill compiled and stored?`);
           return;
         }
 
         const results = await Promise.allSettled(
           workflowKeys.map(async (key) => {
             const task = orchestrator.initTask(key, event.payload);
-            await orchestrator.handleEvent(task.id, event);
+            console.log(`[gmail.route] Created task "${task.id}" for workflow "${key}"`);
+            const logs = await orchestrator.handleEvent(task.id, event);
+            const failed = logs.filter((l) => !l.success);
+            if (failed.length > 0) {
+              failed.forEach((l) => console.error(`[gmail.route] task="${task.id}" step failed: ${l.message}`));
+            }
           })
         );
+
+        results.forEach((r, i) => {
+          if (r.status === "rejected") {
+            console.error(`[gmail.route] workflow[${workflowKeys[i]}] threw:`, r.reason);
+          }
+        });
 
         const anySucceeded = results.some((r) => r.status === "fulfilled");
         if (historyId && !anySucceeded) {
