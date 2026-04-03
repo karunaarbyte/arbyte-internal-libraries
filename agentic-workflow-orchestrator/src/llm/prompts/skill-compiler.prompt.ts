@@ -31,8 +31,11 @@ Return a single JSON object matching this exact structure — no markdown, no ex
   "steps": [
     {
       "key": "<snake_case_step_key>",
-      "description": "<what happens at this step>",
+      "description": "<what happens at this step — see Step descriptions rules>",
       "allowedTools": ["<tool_key>"],
+      "toolKey": "<tool_key or omit if step has multiple allowedTools>",
+      "reads": ["<state keys this step reads from prior steps>"],
+      "writes": ["<state keys this step stores for later steps>"],
       "transitions": [
         {
           "onEvent": "step.<step_key>.complete",
@@ -49,6 +52,8 @@ Return a single JSON object matching this exact structure — no markdown, no ex
 - initialStep must match one of the step keys exactly
 - Every transition's nextStep must match a step key or be the string "end"
 - EVERY step MUST have exactly one tool in allowedTools. Only add a second tool if the choice between them genuinely depends on runtime data that cannot be known at compile time (e.g. send via Gmail OR Slack depending on a condition). Never add a second tool "just in case".
+- When a step has exactly one tool in allowedTools, set toolKey to that same tool key. Omit toolKey only when allowedTools has more than one entry.
+- Always populate reads with any state keys this step uses from prior steps. Always populate writes with any state keys this step stores. Omit reads/writes if the step neither reads nor writes named state keys.
 - For transitions triggered by step completion, onEvent MUST be "step.<current_step_key>.complete"
 - For transitions triggered by external events (e.g. user approval), onEvent must be one of the available trigger event keys (slack.approval_granted, slack.approval_rejected, etc.)
 - If a step can branch (e.g. success vs failure), add multiple transitions with conditions:
