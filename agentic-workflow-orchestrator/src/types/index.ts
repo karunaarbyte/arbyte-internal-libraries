@@ -10,4 +10,4 @@ export type {
   WorkflowDefinitionVersion,
 } from "./workflow-definition";
 
-export type { IToolExecutionResult, LLMToolChoice } from "./tool";
+export type { ArgSource, ArgDef, IToolExecutionResult, LLMToolChoice } from "./tool";
