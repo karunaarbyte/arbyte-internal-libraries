@@ -35,6 +35,7 @@ export class WorkflowFactory {
 
   build(definition: WorkflowDefinition): Workflow {
     this._validateToolKeys(definition);
+    this._validateStateContracts(definition);
 
     const workflow = new Workflow(definition.id, definition.initialStep);
 
@@ -147,6 +148,37 @@ export class WorkflowFactory {
               `Register the tool before building workflows.`
           );
         }
+      }
+      if (step.toolKey && !step.allowedTools.includes(step.toolKey)) {
+        throw new Error(
+          `[WorkflowFactory] Step "${step.key}" has toolKey "${step.toolKey}" not listed in allowedTools.`
+        );
+      }
+    }
+  }
+
+  private _validateStateContracts(definition: WorkflowDefinition): void {
+    // Build the set of keys available at each step by walking the graph in definition order.
+    // Starts with the trigger payload keys (unknown at compile time, so we skip strict checking)
+    // and accumulates writes from each step.
+    const writtenSoFar = new Set<string>();
+
+    // Walk steps in definition order — this matches the expected execution order for linear workflows.
+    // For branching workflows this is a best-effort check; a missing key is a warning, not a hard error,
+    // because we can't statically determine which branch will run.
+    for (const step of definition.steps) {
+      if (step.reads) {
+        for (const key of step.reads) {
+          if (!writtenSoFar.has(key)) {
+            console.warn(
+              `[WorkflowFactory] Step "${step.key}" reads "${key}" but no prior step declares it as a write. ` +
+              `This may be populated by the trigger payload — verify manually.`
+            );
+          }
+        }
+      }
+      if (step.writes) {
+        for (const key of step.writes) writtenSoFar.add(key);
       }
     }
   }

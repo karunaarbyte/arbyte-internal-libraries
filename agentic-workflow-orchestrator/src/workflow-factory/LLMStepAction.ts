@@ -3,6 +3,7 @@ import type { IState } from "fsm-orchestrator";
 import type { IActionLogData } from "fsm-orchestrator/src/types/logs";
 import type { StepDefinition, TransitionDefinition, TransitionCondition, IToolExecutionResult } from "../types";
 import type { IToolRegistry } from "../tools/registry";
+import type { ToolAction } from "../tools/base";
 import type { LLMActionResolver } from "../llm/LLMActionResolver";
 import type { UsageLogger } from "../persistence/UsageLogger";
 
@@ -81,38 +82,49 @@ export class LLMStepAction {
       };
     }
 
-    const { toolKey, args, inputTokens, outputTokens } = await this._resolver.resolve({
-      stepDescription: this._stepDef.description,
-      state,
-      candidateTools,
-    });
+    // Deterministic fast path: toolKey pinned at compile time — skip resolver entirely.
+    let resolvedToolKey: string;
+    let resolvedArgs: Record<string, unknown>;
+    let inputTokens = 0;
+    let outputTokens = 0;
 
-    // Log tokens for every resolver call regardless of what happens next
-    this._usageLogger?.append({
-      timestamp: new Date().toISOString(),
-      workflowId: this._workflowId,
-      stepKey: this._stepDef.key,
-      inputTokens,
-      outputTokens,
-      totalTokens: inputTokens + outputTokens,
-    });
+    if (this._stepDef.toolKey) {
+      resolvedToolKey = this._stepDef.toolKey;
+      resolvedArgs = {};
+    } else {
+      ({ toolKey: resolvedToolKey, args: resolvedArgs, inputTokens, outputTokens } =
+        await this._resolver.resolve({
+          stepDescription: this._stepDef.description,
+          state,
+          candidateTools,
+        }));
 
-    const tool = this._registry.get(toolKey);
+      this._usageLogger?.append({
+        timestamp: new Date().toISOString(),
+        workflowId: this._workflowId,
+        stepKey: this._stepDef.key,
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      });
+    }
+
+    const tool = this._registry.get(resolvedToolKey);
     if (!tool) {
       return {
         success: false,
-        message: `[LLMStepAction] Resolved tool "${toolKey}" not found in registry`,
+        message: `[LLMStepAction] Resolved tool "${resolvedToolKey}" not found in registry`,
         cost: 0,
         new_state: state,
       };
     }
 
-    const toolResult = await tool.execute(args, state);
+    const toolResult = await this._executeWithRetry(tool, resolvedArgs, state);
 
     if (!toolResult.success) {
       return {
         success: false,
-        message: toolResult.message ?? `[LLMStepAction] Tool "${toolKey}" failed`,
+        message: toolResult.message ?? `[LLMStepAction] Tool "${resolvedToolKey}" failed`,
         cost: toolResult.cost ?? 0,
         new_state: state,
       };
@@ -147,6 +159,38 @@ export class LLMStepAction {
       cost: toolResult.cost ?? 1,
       new_state: { key: nextStateKey, data: mergedData },
     };
+  }
+
+  private async _executeWithRetry(
+    tool: ToolAction,
+    args: Record<string, unknown>,
+    state: IState,
+    maxAttempts = 3
+  ): Promise<IToolExecutionResult> {
+    let lastResult: IToolExecutionResult | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await tool.execute(args, state);
+        if (result.success) return result;
+        lastResult = result;
+        // Non-retryable: tool ran and explicitly reported failure (e.g. missing args, dedup skip)
+        if (result.cost === 0) return result;
+      } catch (err) {
+        lastResult = {
+          success: false,
+          message: err instanceof Error ? err.message : String(err),
+          cost: 0,
+        };
+      }
+      if (attempt < maxAttempts) {
+        const delayMs = 500 * 2 ** (attempt - 1); // 500ms, 1000ms
+        console.warn(
+          `[LLMStepAction] Step "${this._stepDef.key}" attempt ${attempt} failed — retrying in ${delayMs}ms`
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+    return lastResult!;
   }
 
   private _selectTransition(result: IToolExecutionResult): TransitionDefinition {
