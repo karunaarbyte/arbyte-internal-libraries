@@ -25,7 +25,9 @@ import {
   InvocationLogStore,
 } from "./persistence";
 import { UsageLogger } from "./persistence/UsageLogger";
+import { ToolFailureLogger } from "./persistence/ToolFailureLogger";
 import { buildWebhookServer, startServer } from "./webhooks";
+import { setGmailHistoryCursor } from "./webhooks/routes";
 import { google } from "googleapis";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -53,14 +55,15 @@ registry.register(new SlackSendApprovalRequestAction());
 // ── LLM clients ───────────────────────────────────────────────
 // skill compiler: gpt-4o (quality) | step resolver: gpt-4o-mini (cost)
 
-const compilerLLM = new OpenAIClient({ model: "gpt-4o" });
+const compilerLLM = new OpenAIClient({ model: "gpt-4o", temperature: 0 });
 const resolverLLM = new OpenAIClient({ model: "gpt-4o-mini" });
 
 // ── Core services ─────────────────────────────────────────────
 
-const usageLogger = new UsageLogger(`${WORKFLOW_STORAGE_DIR}/usage-log.json`);
+const usageLogger = new UsageLogger(`${WORKFLOW_STORAGE_DIR}/_usage-log.jsonl`);
+const failureLogger = new ToolFailureLogger(`${WORKFLOW_STORAGE_DIR}/_tool-failures.jsonl`);
 const resolver = new LLMActionResolver(resolverLLM);
-const factory = new WorkflowFactory(registry, resolver, usageLogger);
+const factory = new WorkflowFactory(registry, resolver, usageLogger, failureLogger);
 
 const definitionStore = new WorkflowDefinitionStore(WORKFLOW_STORAGE_DIR);
 const taskStore = new TaskStateStore();
@@ -115,6 +118,7 @@ async function boot(): Promise<void> {
       });
       const expiresAt = res.data.expiration ? new Date(Number(res.data.expiration)).toISOString() : "unknown";
       console.log(`[boot] Gmail watch registered — historyId: ${res.data.historyId}, expires: ${expiresAt}`);
+      if (res.data.historyId) setGmailHistoryCursor(res.data.historyId);
     } catch (err) {
       console.error("[boot] Failed to register Gmail watch:", err);
     }
