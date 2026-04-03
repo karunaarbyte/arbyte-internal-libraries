@@ -45,7 +45,7 @@ export class AgenticOrchestrator extends Orchestrator {
   // in the button value and the interactions route can resume
   // the correct task on button click.
 
-  public initTask(workflowKey: string, initialData?: Record<string, unknown>): ITask {
+  public override initTask(workflowKey: string, initialData?: Record<string, unknown>): ITask {
     const task = super.initTask(workflowKey, initialData);
     // Inject task_id into state.data so all steps have it available.
     // slack.send_approval_request embeds it in the button value so the
@@ -73,7 +73,7 @@ export class AgenticOrchestrator extends Orchestrator {
   // instance, preventing concurrent tasks from corrupting each
   // other's state on the shared workflow object.
 
-  public async handleEvent(taskId: string, event: IEvent): Promise<IInvocationLog[]> {
+  public override async handleEvent(taskId: string, event: IEvent): Promise<IInvocationLog[]> {
     const task = this.getTask(taskId);
     if (!task) {
       console.error(`[AgenticOrchestrator] handleEvent: task "${taskId}" not found`);
@@ -113,7 +113,9 @@ export class AgenticOrchestrator extends Orchestrator {
     const result = await taskWorkflow.handleEvent(event, this.messenger);
 
     if (!result.success) {
-      console.error(`[AgenticOrchestrator] task="${taskId}" event="${event.key}" failed: ${result.message}`);
+      const isSkip = result.data?.failureKind === "skip";
+      const logFn = isSkip ? console.log : console.error;
+      logFn(`[AgenticOrchestrator] task="${taskId}" event="${event.key}" ${isSkip ? "skipped" : "failed"}: ${result.message}`);
     }
 
     if (result.success) {
