@@ -114,7 +114,7 @@ export class DriveWatcher {
     }
 
     const content = await this._fetchFileContent(fileId);
-    await this._compiler.compile(content);
+    await this._compiler.compile(content, fileId);
     console.log(`[DriveWatcher] Compiled "${fileName}"`);
   }
 
@@ -146,7 +146,7 @@ export class DriveWatcher {
 
     console.log(`[DriveWatcher] Change detected for file "${fileId}" — compiling`);
     const content = await this._fetchFileContent(fileId);
-    await this._compiler.compile(content);
+    await this._compiler.compile(content, fileId);
   }
 
   // ── Channel persistence ───────────────────────────────────

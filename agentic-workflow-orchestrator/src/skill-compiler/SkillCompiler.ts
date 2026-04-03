@@ -27,8 +27,8 @@ export class SkillCompiler {
     this._onReload = onReload;
   }
 
-  async compile(skillFileContent: string): Promise<WorkflowDefinitionVersion | null> {
-    const definition = await this._parser.parse(skillFileContent);
+  async compile(skillFileContent: string, stableFileId?: string): Promise<WorkflowDefinitionVersion | null> {
+    const definition = await this._parser.parse(skillFileContent, stableFileId);
     if (!definition) return null;
 
     const existing = await this._store.getAll(definition.id);

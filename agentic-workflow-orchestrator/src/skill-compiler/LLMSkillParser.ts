@@ -25,15 +25,17 @@ export class LLMSkillParser {
     "gmail.email_received",
     "slack.message",
     "slack.app_mention",
+    "slack.approval_granted",
+    "slack.approval_rejected",
     "drive.file_changed",
     "manual_trigger",
   ];
 
-  async parse(skillFileContent: string): Promise<WorkflowDefinition | null> {
+  async parse(skillFileContent: string, stableFileId?: string): Promise<WorkflowDefinition | null> {
     const availableToolKeys = this._registry.getAll().map((t) => t.key);
 
     const response = await this._client.complete<WorkflowDefinition & { error?: string }>({
-      systemPrompt: buildSkillCompilerPrompt(availableToolKeys, LLMSkillParser.TRIGGER_EVENT_KEYS),
+      systemPrompt: buildSkillCompilerPrompt(availableToolKeys, LLMSkillParser.TRIGGER_EVENT_KEYS, stableFileId),
       messages: [{ role: "user", content: skillFileContent }],
       jsonMode: true,
     });
