@@ -30,12 +30,18 @@ type ChannelRecord = {
   webhookBaseUrl: string;
 };
 
+// How long to wait after the last notification before triggering a compile.
+// Drive sends 5-15 rapid notifications per save — this collapses them into one.
+const DEBOUNCE_MS = 5000;
+
 export class DriveWatcher {
   private readonly _compiler: SkillCompiler;
   private readonly _channelFile: string;
 
   // Maps Drive resource ID → file ID
   private readonly _watchedResources = new Map<string, string>();
+  // Per-file debounce timers
+  private readonly _debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(compiler: SkillCompiler, storageDir = "./.workflow-store") {
     this._compiler = compiler;
@@ -144,9 +150,22 @@ export class DriveWatcher {
       return;
     }
 
-    console.log(`[DriveWatcher] Change detected for file "${fileId}" — compiling`);
-    const content = await this._fetchFileContent(fileId);
-    await this._compiler.compile(content, fileId);
+    // Debounce — cancel any pending compile for this file and restart the timer
+    const existing = this._debounceTimers.get(fileId);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(async () => {
+      this._debounceTimers.delete(fileId);
+      console.log(`[DriveWatcher] Change detected for file "${fileId}" — compiling`);
+      try {
+        const content = await this._fetchFileContent(fileId);
+        await this._compiler.compile(content, fileId);
+      } catch (err) {
+        console.error(`[DriveWatcher] Failed to compile file "${fileId}":`, err);
+      }
+    }, DEBOUNCE_MS);
+
+    this._debounceTimers.set(fileId, timer);
   }
 
   // ── Channel persistence ───────────────────────────────────
