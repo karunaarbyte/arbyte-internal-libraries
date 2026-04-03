@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import type { IState } from "fsm-orchestrator";
 import { ToolAction, fromState, stripTrailingSignature } from "../base";
-import type { IToolExecutionResult } from "../../types";
+import type { ArgDef, IToolExecutionResult } from "../../types";
 import { getGoogleAuthClient } from "../../lib/google-auth";
 
 // ─────────────────────────────────────────────────────────────
@@ -68,7 +68,21 @@ const _processedMessageIds = new Set<string>();
 export class GmailReadAction extends ToolAction {
   readonly key = "gmail.read";
   readonly description =
-    "Read the most recent unread email from the Gmail inbox. Returns sender, subject, body, and message ID.";
+    "Read the most recent new email triggered by a Gmail Pub/Sub notification. " +
+    "Reads state.data.start_history_id (the cursor set by the webhook) to find the message. " +
+    "Returns: message_id, thread_id, from (sender address), subject, body, date.";
+
+  override readonly inputSchema: ArgDef[] = [
+    {
+      name: "start_history_id",
+      description: "The Gmail history cursor set by the webhook. Read from state.data.start_history_id. Do not generate this value.",
+      source: "state",
+      required: false,
+      stateKeys: ["start_history_id"],
+    },
+  ];
+
+  override readonly outputFields = ["message_id", "thread_id", "from", "subject", "body", "date"];
 
   async execute(
     args: Record<string, unknown>,
@@ -76,13 +90,15 @@ export class GmailReadAction extends ToolAction {
   ): Promise<IToolExecutionResult> {
     const gmail = getGmail();
 
-    // If a history_id is in state (from Pub/Sub notification), use it to
-    // fetch only new messages. Otherwise fall back to latest unread.
-    const historyId = (state.data.history_id ?? args.history_id) as string | undefined;
+    // start_history_id is the cursor (previous notification's historyId).
+    // history.list(startHistoryId=X) returns changes AFTER X, so using the
+    // notification's own historyId would always return empty.
+    const historyId = (state.data.start_history_id ?? args.start_history_id) as string | undefined;
 
     let messageId: string | undefined;
 
     if (historyId) {
+      console.log(`[GmailReadAction] Fetching history since historyId="${historyId}"`);
       const historyRes = await gmail.users.history.list({
         userId: "me",
         startHistoryId: historyId,
@@ -92,20 +108,24 @@ export class GmailReadAction extends ToolAction {
         (h) => h.messagesAdded?.map((m) => m.message?.id) ?? []
       ) ?? [];
       messageId = messages[0] ?? undefined;
-    }
+      console.log(`[GmailReadAction] History lookup: ${messages.length} message(s) — using "${messageId ?? "none"}"`);
 
-    if (!messageId) {
-      // Fallback: get latest unread
+      if (!messageId) {
+        return { success: false, message: "No new messages in this history window — skipping", failureKind: "skip" };
+      }
+    } else {
+      console.log(`[GmailReadAction] No historyId — fetching latest unread`);
       const listRes = await gmail.users.messages.list({
         userId: "me",
         q: "is:unread",
         maxResults: 1,
       });
       messageId = listRes.data.messages?.[0]?.id ?? undefined;
+      console.log(`[GmailReadAction] Unread lookup: "${messageId ?? "none"}"`);
     }
 
     if (!messageId) {
-      return { success: false, message: "No unread messages found", cost: 1 };
+      return { success: false, message: "No unread messages found", failureKind: "tool_error", cost: 1 };
     }
 
     const taskId = (state.data.task_id as string | undefined) ?? "unknown";
@@ -113,7 +133,7 @@ export class GmailReadAction extends ToolAction {
 
     if (_processedMessageIds.has(dedupKey)) {
       console.log(`[GmailReadAction] Message "${messageId}" already processed by task "${taskId}" — skipping`);
-      return { success: false, message: "Message already processed", cost: 0 };
+      return { success: false, message: "Message already processed", failureKind: "skip" };
     }
 
     // Mark before fetch so concurrent re-deliveries for the same task don't both call messages.get.
@@ -122,18 +142,17 @@ export class GmailReadAction extends ToolAction {
     if (_processedMessageIds.size > 500)
       _processedMessageIds.delete(_processedMessageIds.values().next().value!);
 
-    let msgRes: Awaited<ReturnType<typeof gmail.users.messages.get>>;
-    try {
-      msgRes = await gmail.users.messages.get({
-        userId: "me",
-        id: messageId,
-        format: "full",
-      });
-    } catch (err) {
+    console.log(`[GmailReadAction] Fetching message "${messageId}"`);
+    const msgRes = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    }).catch((err: unknown) => {
       // Transient error — remove from dedup set so the next Pub/Sub delivery can retry
       _processedMessageIds.delete(dedupKey);
       throw err;
-    }
+    });
+    console.log(`[GmailReadAction] Fetched message "${messageId}" OK`);
 
     const headers = msgRes.data.payload?.headers ?? [];
     const from = extractHeader(headers, "from");
@@ -144,8 +163,7 @@ export class GmailReadAction extends ToolAction {
     const ownEmail = process.env.GMAIL_USER_EMAIL ?? "";
     if (ownEmail && from.includes(ownEmail)) {
       console.log(`[GmailReadAction] Email from self (${from}) — skipping to prevent loop`);
-      // Keep in processed set — self-sent messages should never trigger the workflow
-      return { success: false, message: "Email from self — skipped", cost: 0 };
+      return { success: false, message: "Email from self — skipped", failureKind: "skip" };
     }
 
     // Extract body — check parts for text/plain first, fallback to snippet
@@ -180,7 +198,34 @@ export class GmailReadAction extends ToolAction {
 export class GmailSendAction extends ToolAction {
   readonly key = "gmail.send";
   readonly description =
-    "Send a new email via Gmail. Requires: to (recipient address), subject, and body.";
+    "Send a new Gmail email. " +
+    "Requires: to (recipient email address), subject (email subject line), body (email body text). " +
+    "Read body from state.data using the key where the draft was stored (e.g. state.data.reply_body). " +
+    "Do not re-draft the body — use the stored draft value.";
+
+  override readonly inputSchema: ArgDef[] = [
+    {
+      name: "to",
+      description: "Recipient email address. Generate from state.data.from (the sender of the original email) or from the step description.",
+      source: "llm",
+      required: true,
+    },
+    {
+      name: "subject",
+      description: "Email subject line. Use state.data.subject if replying, or generate from step description.",
+      source: "llm",
+      required: true,
+    },
+    {
+      name: "body",
+      description: "Email body text. Read from state.data.reply_body (or draft_body / draft / email_body). Do not re-draft.",
+      source: "state",
+      required: true,
+      stateKeys: ["reply_body", "draft_body", "draft", "email_body"],
+    },
+  ];
+
+  override readonly outputFields = ["message_id", "thread_id", "to", "subject", "sent_at"];
 
   async execute(
     args: Record<string, unknown>,
@@ -188,12 +233,11 @@ export class GmailSendAction extends ToolAction {
   ): Promise<IToolExecutionResult> {
     const to = args.to as string;
     const subject = args.subject as string;
-    // Prefer state draft (full) over LLM arg (may be truncated by resolver context)
     const draftBody = fromState(state, ["reply_body", "draft_body", "draft", "email_body"], args.body);
     const body = draftBody ? stripTrailingSignature(draftBody) : draftBody;
 
     if (!to || !subject || !body) {
-      return { success: false, message: "Missing required args: to, subject, body", cost: 0 };
+      return { success: false, message: "Missing required args: to, subject, body", failureKind: "arg_error" };
     }
 
     const gmail = getGmail();
@@ -225,7 +269,30 @@ export class GmailSendAction extends ToolAction {
 export class GmailReplyAction extends ToolAction {
   readonly key = "gmail.reply";
   readonly description =
-    "Reply to an existing Gmail thread. Requires: message_id (original message to reply to), body. Optionally: subject override.";
+    "Reply to an existing Gmail thread using the original message ID. " +
+    "Read message_id from state.data.message_id (set by the gmail.read step). " +
+    "Read the reply body from state.data — check reply_body, then draft_body, then draft, then email_body in that order. " +
+    "Do not re-draft the reply body — use the stored draft value. " +
+    "Pass message_id as the only required arg; body is read from state automatically.";
+
+  override readonly inputSchema: ArgDef[] = [
+    {
+      name: "message_id",
+      description: "The Gmail message ID of the original email to reply to. Read from state.data.message_id.",
+      source: "state",
+      required: true,
+      stateKeys: ["message_id"],
+    },
+    {
+      name: "body",
+      description: "The reply text. Read from state.data.reply_body (or draft_body / draft / email_body). Do not generate — use the stored draft.",
+      source: "state",
+      required: true,
+      stateKeys: ["reply_body", "draft_body", "draft", "email_body"],
+    },
+  ];
+
+  override readonly outputFields = ["message_id", "thread_id", "replied_to", "sent_at"];
 
   async execute(
     args: Record<string, unknown>,
@@ -233,21 +300,18 @@ export class GmailReplyAction extends ToolAction {
   ): Promise<IToolExecutionResult> {
     const messageId = (args.message_id ?? state.data.message_id) as string;
     const approvedBy = (state.data.approved_by ?? args.approved_by) as string | undefined;
-    // Prefer state draft (full) over LLM arg (may be truncated by resolver context)
     const draftBody = fromState(state, ["reply_body", "draft_body", "draft", "email_body"], args.body);
-    // Strip any sign-off the LLM included, then append the authoritative signature
     const cleanBody = draftBody ? stripTrailingSignature(draftBody) : draftBody;
     const body = approvedBy && cleanBody
       ? `${cleanBody}\n\nBest,\n${approvedBy}`
       : cleanBody;
 
     if (!messageId || !body) {
-      return { success: false, message: "Missing required args: message_id, body", cost: 0 };
+      return { success: false, message: "Missing required args: message_id, body", failureKind: "arg_error" };
     }
 
     const gmail = getGmail();
 
-    // Fetch original message to get thread, sender, subject
     const original = await gmail.users.messages.get({
       userId: "me",
       id: messageId,

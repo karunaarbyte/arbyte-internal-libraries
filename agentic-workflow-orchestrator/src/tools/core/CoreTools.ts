@@ -1,6 +1,6 @@
 import type { IState } from "fsm-orchestrator";
 import { ToolAction } from "../base";
-import type { IToolExecutionResult } from "../../types";
+import type { ArgDef, IToolExecutionResult } from "../../types";
 
 // ─────────────────────────────────────────────────────────────
 // CoreTools — general-purpose tools not tied to any external service.
@@ -15,8 +15,27 @@ import type { IToolExecutionResult } from "../../types";
 export class DraftTextAction extends ToolAction {
   readonly key = "core.draft_text";
   readonly description =
-    "Draft a piece of text (reply, message, summary) and store it in state for use by later steps. " +
-    "Requires: draft_key (the state key to store under, e.g. 'reply_body'), text (the content to store).";
+    "Store a generated text draft in state for use by later steps. " +
+    "Provide draft_key (the exact state key to store under, e.g. 'reply_body') and text (the content to store). " +
+    "Never use this tool to re-read or pass through existing state — only for new LLM-generated content.";
+
+  override readonly inputSchema: ArgDef[] = [
+    {
+      name: "draft_key",
+      description: "The state key to store the draft under (e.g. 'reply_body', 'summary'). Must match the key named in the step description after 'store as'.",
+      source: "llm",
+      required: true,
+    },
+    {
+      name: "text",
+      description: "The generated text content to store. Must be the full, final draft — no truncation.",
+      source: "llm",
+      required: true,
+    },
+  ];
+
+  // Sentinel — the actual key written is determined at runtime from draft_key arg.
+  override readonly outputFields = ["<draft_key>"];
 
   async execute(
     args: Record<string, unknown>,
@@ -26,7 +45,7 @@ export class DraftTextAction extends ToolAction {
     const text = args.text as string;
 
     if (!draftKey || !text) {
-      return { success: false, message: "Missing required args: draft_key, text", cost: 0 };
+      return { success: false, message: "Missing required args: draft_key, text", failureKind: "arg_error" };
     }
 
     return {

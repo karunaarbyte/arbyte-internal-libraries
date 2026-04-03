@@ -1,6 +1,6 @@
 import { Action } from "fsm-orchestrator";
 import type { IState } from "fsm-orchestrator";
-import type { IToolExecutionResult } from "../../types";
+import type { ArgDef, IToolExecutionResult } from "../../types";
 
 // ─────────────────────────────────────────────────────────────
 // ToolAction — abstract base for all tool implementations.
@@ -16,6 +16,17 @@ export abstract class ToolAction {
 
   // Sent verbatim to the LLM for tool selection — be precise.
   abstract readonly description: string;
+
+  // Structured input contract. When declared, pre-execution validation runs before any API call.
+  // source="state": value read from state.data (use stateKeys for fromState multi-key fallback).
+  // source="llm":   resolver must generate this value.
+  // source="params": provided at compile time via StepDefinition.params.
+  readonly inputSchema?: ArgDef[];
+
+  // State keys this tool writes to state.data on success.
+  // Used by the skill compiler to populate step writes[] and generate accurate outputFields in prompt.
+  // Use "<draft_key>" as a sentinel when the key is dynamic (e.g. core.draft_text).
+  readonly outputFields?: string[];
 
   // The actual tool work. Subclasses implement this.
   abstract execute(
