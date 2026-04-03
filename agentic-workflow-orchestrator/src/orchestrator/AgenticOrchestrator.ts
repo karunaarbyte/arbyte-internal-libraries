@@ -1,5 +1,5 @@
-import { Orchestrator } from "fsm-orchestrator";
-import type { ITask } from "fsm-orchestrator";
+import { Orchestrator, Workflow } from "fsm-orchestrator";
+import type { ITask, IEvent } from "fsm-orchestrator";
 import type { IInvocationLog } from "fsm-orchestrator/src/types/logs";
 import type { IWorkflowDefinitionStore } from "../persistence/WorkflowDefinitionStore";
 import type { ITaskStateStore } from "../persistence/TaskStateStore";
@@ -24,6 +24,9 @@ export class AgenticOrchestrator extends Orchestrator {
   private readonly _logStore: IInvocationLogStore;
   private readonly _factory: WorkflowFactory;
 
+  // Per-task isolated Workflow instances — prevents shared state corruption
+  // when multiple tasks run concurrently on the same workflow type.
+  private readonly _taskWorkflows = new Map<string, Workflow>();
   constructor(
     definitionStore: IWorkflowDefinitionStore,
     taskStore: ITaskStateStore,
@@ -35,6 +38,20 @@ export class AgenticOrchestrator extends Orchestrator {
     this._taskStore = taskStore;
     this._logStore = logStore;
     this._factory = factory;
+  }
+
+  // ── Task init — injects task_id into state.data ──────────
+  // Required so slack.send_approval_request can embed task_id
+  // in the button value and the interactions route can resume
+  // the correct task on button click.
+
+  public initTask(workflowKey: string, initialData?: Record<string, unknown>): ITask {
+    const task = super.initTask(workflowKey, initialData);
+    // Inject task_id into state.data so all steps have it available.
+    // slack.send_approval_request embeds it in the button value so the
+    // interactions route can resume the correct task on button click.
+    task.state = { ...task.state, data: { ...task.state.data, task_id: task.id } };
+    return task;
   }
 
   // ── FSM abstract method implementations ──────────────────
@@ -49,6 +66,79 @@ export class AgenticOrchestrator extends Orchestrator {
     this._logStore.append(log).catch((err) =>
       console.error(`[AgenticOrchestrator] Failed to persist log for task "${log.task_id}":`, err)
     );
+  }
+
+  // ── Isolated handleEvent ─────────────────────────────────
+  // Overrides the base class to give each task its own Workflow
+  // instance, preventing concurrent tasks from corrupting each
+  // other's state on the shared workflow object.
+
+  public async handleEvent(taskId: string, event: IEvent): Promise<IInvocationLog[]> {
+    const task = this.getTask(taskId);
+    if (!task) {
+      return [{
+        success: false,
+        message: `Task '${taskId}' not found`,
+        task_id: taskId,
+        event,
+        timestamp: new Date().toISOString(),
+      }];
+    }
+
+    // Get or build a dedicated Workflow instance for this task
+    let taskWorkflow = this._taskWorkflows.get(taskId);
+    if (!taskWorkflow) {
+      const active = await this._definitionStore.getActive(task.workflowKey);
+      if (!active) {
+        return [{
+          success: false,
+          message: `No active definition for workflow '${task.workflowKey}'`,
+          task_id: taskId,
+          event,
+          timestamp: new Date().toISOString(),
+        }];
+      }
+      taskWorkflow = this._factory.build(active.definition);
+      this._taskWorkflows.set(taskId, taskWorkflow);
+    }
+
+    // Merge event payload into state so steps can access trigger data (e.g. approved_by)
+    const stateWithPayload = event.payload && Object.keys(event.payload).length > 0
+      ? { ...task.state, data: { ...task.state.data, ...event.payload } }
+      : task.state;
+    taskWorkflow.setState(stateWithPayload);
+    const result = await taskWorkflow.handleEvent(event, this.messenger);
+
+    if (result.success) {
+      task.state = result.new_state ?? task.state;
+      this.persistTaskState(task);
+    }
+
+    const invocationLog: IInvocationLog = {
+      action_log_data: result,
+      task_id: task.id,
+      event,
+      success: result.success,
+      timestamp: new Date().toISOString(),
+    };
+    this.logs.push(invocationLog);
+    this.persistInvocationLog(invocationLog);
+
+    // Auto-chain to next step
+    if (result.success && result.emitEvent) {
+      const nextEvent: IEvent = {
+        key: result.emitEvent.key,
+        payload: result.emitEvent.buildPayload?.(result) ?? {},
+      };
+      await this.handleEvent(task.id, nextEvent);
+    }
+
+    // Free the isolated workflow once the task reaches end state
+    if (task.state.key === "end") {
+      this._taskWorkflows.delete(taskId);
+    }
+
+    return [invocationLog];
   }
 
   // ── Workflow reload ───────────────────────────────────────
@@ -75,6 +165,14 @@ export class AgenticOrchestrator extends Orchestrator {
       console.log(
         `[AgenticOrchestrator] Registered new workflow "${workflowId}" (version ${active.version})`
       );
+    }
+
+    // Evict cached per-task workflow instances for this workflow so that the next
+    // event on any task picks up the new definition from the store.
+    for (const task of this.getTasks()) {
+      if (task.workflowKey === workflowId) {
+        this._taskWorkflows.delete(task.id);
+      }
     }
   }
 
