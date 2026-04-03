@@ -13,6 +13,16 @@ import type { AgenticOrchestrator } from "../../orchestrator/AgenticOrchestrator
 const TRIGGER_EVENT_KEY = "gmail.email_received";
 const _processedHistoryIds = new Set<string>();
 
+// Cursor tracking — the startHistoryId for the next history.list call.
+// history.list(startHistoryId=X) returns changes AFTER X, so this must be
+// a real historyId from a prior Gmail response, never an arithmetic derivation.
+// Bootstrapped at boot via setGmailHistoryCursor(); seeded from env as fallback.
+let _lastHistoryId: string | undefined = process.env.GMAIL_HISTORY_ID;
+
+export const setGmailHistoryCursor = (historyId: string): void => {
+  _lastHistoryId = historyId;
+};
+
 export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
   const route = new Hono();
 
@@ -38,22 +48,32 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
       }
     }
 
-    const event = {
-      key: "gmail.email_received",
-      payload: {
-        history_id: emailData.historyId ?? "",
-        message_id: message?.messageId ?? "",
-        received_at: new Date().toISOString(),
-        slack_channel: process.env.SLACK_DEFAULT_CHANNEL ?? "",
-      },
-    };
-
     // Dedup synchronously before ACKing — prevents two near-simultaneous Pub/Sub
     // deliveries of the same historyId both slipping through before either completes.
     // Trade-off: if some workflows succeed and others fail, the historyId stays locked
     // and the failed workflows won't be retried. Acceptable because per-message dedup
     // in GmailReadAction provides a second layer of protection.
     const historyId = String(emailData.historyId ?? "");
+
+    // If no cursor yet, skip this notification — cursor must be bootstrapped at boot
+    // via setGmailHistoryCursor(). Arithmetic derivation from the notification's
+    // historyId is unsafe: Gmail historyIds are opaque cursors, not arithmetic values.
+    if (!_lastHistoryId) {
+      console.warn(`[gmail.route] No history cursor set — skipping notification historyId="${historyId}". ` +
+        `Ensure Gmail watch registration succeeded at boot.`);
+      return c.json({ received: true }, 200);
+    }
+
+    const event = {
+      key: "gmail.email_received",
+      payload: {
+        history_id: emailData.historyId ?? "",
+        start_history_id: _lastHistoryId,
+        message_id: message?.messageId ?? "",
+        received_at: new Date().toISOString(),
+        slack_channel: process.env.SLACK_DEFAULT_CHANNEL ?? "",
+      },
+    };
     if (historyId && _processedHistoryIds.has(historyId)) {
       console.log(`[gmail.route] Duplicate history_id "${historyId}" — ignoring`);
       return c.json({ received: true }, 200);
@@ -75,26 +95,36 @@ export const buildGmailRoute = (orchestrator: AgenticOrchestrator): Hono => {
           return;
         }
 
-        const results = await Promise.allSettled(
+        const outcomes = await Promise.allSettled(
           workflowKeys.map(async (key) => {
             const task = orchestrator.initTask(key, event.payload);
             console.log(`[gmail.route] Created task "${task.id}" for workflow "${key}"`);
             const logs = await orchestrator.handleEvent(task.id, event);
-            const failed = logs.filter((l) => !l.success);
-            if (failed.length > 0) {
-              failed.forEach((l) => console.error(`[gmail.route] task="${task.id}" step failed: ${l.message}`));
-            }
+            const skipped = logs.filter((l) => !l.success && l.action_log_data?.data?.failureKind === "skip");
+            const failed = logs.filter((l) => !l.success && l.action_log_data?.data?.failureKind !== "skip");
+            skipped.forEach((l) => console.log(`[gmail.route] task="${task.id}" skipped: ${l.action_log_data?.message}`));
+            failed.forEach((l) => console.error(`[gmail.route] task="${task.id}" step failed: ${l.action_log_data?.message}`));
+            // First log reflects the Gmail-level result (did we read the email?).
+            // Downstream step failures are workflow-level, not Gmail-level.
+            const firstLog = logs[0];
+            return firstLog?.success === true || firstLog?.action_log_data?.data?.failureKind === "skip";
           })
         );
 
-        results.forEach((r, i) => {
+        outcomes.forEach((r, i) => {
           if (r.status === "rejected") {
             console.error(`[gmail.route] workflow[${workflowKeys[i]}] threw:`, r.reason);
           }
         });
 
-        const anySucceeded = results.some((r) => r.status === "fulfilled");
-        if (historyId && !anySucceeded) {
+        // Advance cursor whenever the Gmail-level step was handled (read or intentional skip).
+        // Only release the dedup lock if every workflow threw — allowing Pub/Sub to retry.
+        const anyHandled = outcomes.some((r) => r.status === "fulfilled" && r.value === true);
+        const allThrew = outcomes.every((r) => r.status === "rejected");
+        if (historyId && anyHandled) {
+          _lastHistoryId = historyId;
+        }
+        if (historyId && allThrew) {
           _processedHistoryIds.delete(historyId);
         }
       } catch (err) {

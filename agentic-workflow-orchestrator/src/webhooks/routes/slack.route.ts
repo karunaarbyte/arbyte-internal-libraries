@@ -30,6 +30,11 @@ export const buildSlackRoute = (orchestrator: AgenticOrchestrator): Hono => {
       return c.json({ received: true }, 200);
     }
 
+    // Ignore bot messages (including our own outbound notifications)
+    if (slackEvent.bot_id || slackEvent.subtype === "bot_message") {
+      return c.json({ received: true }, 200);
+    }
+
     const eventType = slackEvent.type as string | undefined;
 
     const event = {
