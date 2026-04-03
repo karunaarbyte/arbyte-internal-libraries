@@ -20,7 +20,7 @@ export class SlackSendMessageAction extends ToolAction {
     args: Record<string, unknown>,
     state: IState
   ): Promise<IToolExecutionResult> {
-    const channel = args.channel as string;
+    const channel = (args.channel ?? state.data.slack_channel) as string;
     // Prefer state draft (full) over LLM arg (may be truncated by resolver context)
     const text = fromState(state, ["slack_message_body", "message_body", "draft_body", "draft"], args.text);
 

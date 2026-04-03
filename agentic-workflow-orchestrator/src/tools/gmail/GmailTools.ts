@@ -60,8 +60,9 @@ const extractHeader = (
 
 // ── GmailReadAction ───────────────────────────────────────────
 
-// Dedup at message level — historyId dedup in the route isn't sufficient because
-// Gmail Pub/Sub can emit multiple notifications with different historyIds for the same email.
+// Dedup at task+message level — prevents the same task from processing the same message twice
+// (e.g. if Pub/Sub re-delivers with a different historyId). Scoped to task_id so a new task
+// created for the same email (e.g. after a prior task failed) is not blocked.
 const _processedMessageIds = new Set<string>();
 
 export class GmailReadAction extends ToolAction {
@@ -107,14 +108,17 @@ export class GmailReadAction extends ToolAction {
       return { success: false, message: "No unread messages found", cost: 1 };
     }
 
-    if (_processedMessageIds.has(messageId)) {
-      console.log(`[GmailReadAction] Message "${messageId}" already processed — skipping`);
+    const taskId = (state.data.task_id as string | undefined) ?? "unknown";
+    const dedupKey = `${taskId}:${messageId}`;
+
+    if (_processedMessageIds.has(dedupKey)) {
+      console.log(`[GmailReadAction] Message "${messageId}" already processed by task "${taskId}" — skipping`);
       return { success: false, message: "Message already processed", cost: 0 };
     }
 
-    // Mark before fetch so concurrent re-deliveries don't both call messages.get.
+    // Mark before fetch so concurrent re-deliveries for the same task don't both call messages.get.
     // On transient failure we remove it so the next delivery can retry.
-    _processedMessageIds.add(messageId);
+    _processedMessageIds.add(dedupKey);
     if (_processedMessageIds.size > 500)
       _processedMessageIds.delete(_processedMessageIds.values().next().value!);
 
@@ -127,7 +131,7 @@ export class GmailReadAction extends ToolAction {
       });
     } catch (err) {
       // Transient error — remove from dedup set so the next Pub/Sub delivery can retry
-      _processedMessageIds.delete(messageId);
+      _processedMessageIds.delete(dedupKey);
       throw err;
     }
 
