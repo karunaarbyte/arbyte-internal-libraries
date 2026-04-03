@@ -5,6 +5,7 @@ import type { IToolRegistry } from "../tools/registry";
 import type { LLMActionResolver } from "../llm/LLMActionResolver";
 import { LLMStepAction, stepTriggerEvent } from "./LLMStepAction";
 import type { UsageLogger } from "../persistence/UsageLogger";
+import type { ToolFailureLogger } from "../persistence/ToolFailureLogger";
 
 // ─────────────────────────────────────────────────────────────
 // WorkflowFactory — converts a WorkflowDefinition into an FSM
@@ -26,11 +27,13 @@ export class WorkflowFactory {
   private readonly _registry: IToolRegistry;
   private readonly _resolver: LLMActionResolver;
   private readonly _usageLogger?: UsageLogger;
+  private readonly _failureLogger?: ToolFailureLogger;
 
-  constructor(registry: IToolRegistry, resolver: LLMActionResolver, usageLogger?: UsageLogger) {
+  constructor(registry: IToolRegistry, resolver: LLMActionResolver, usageLogger?: UsageLogger, failureLogger?: ToolFailureLogger) {
     this._registry = registry;
     this._resolver = resolver;
     this._usageLogger = usageLogger;
+    this._failureLogger = failureLogger;
   }
 
   build(definition: WorkflowDefinition): Workflow {
@@ -42,7 +45,7 @@ export class WorkflowFactory {
     // Build one LLMStepAction per step (factory, not yet an Action instance)
     const stepActionFactories = new Map(
       definition.steps.map((stepDef) => {
-        const llmStepAction = new LLMStepAction(stepDef, definition.id, this._registry, this._resolver, this._usageLogger);
+        const llmStepAction = new LLMStepAction(stepDef, definition.id, this._registry, this._resolver, this._usageLogger, this._failureLogger);
         return [stepDef.key, { stepDef, llmStepAction }];
       })
     );
@@ -158,21 +161,18 @@ export class WorkflowFactory {
   }
 
   private _validateStateContracts(definition: WorkflowDefinition): void {
-    // Build the set of keys available at each step by walking the graph in definition order.
-    // Starts with the trigger payload keys (unknown at compile time, so we skip strict checking)
-    // and accumulates writes from each step.
+    // Trigger payload fields (e.g. slack_channel, history_id) are merged into state.data
+    // for every step — not just the initial one. We can't enumerate them statically, so
+    // this check is warn-only: a missing key may be trigger-provided, not a wiring error.
     const writtenSoFar = new Set<string>();
 
-    // Walk steps in definition order — this matches the expected execution order for linear workflows.
-    // For branching workflows this is a best-effort check; a missing key is a warning, not a hard error,
-    // because we can't statically determine which branch will run.
     for (const step of definition.steps) {
       if (step.reads) {
         for (const key of step.reads) {
           if (!writtenSoFar.has(key)) {
             console.warn(
-              `[WorkflowFactory] Step "${step.key}" reads "${key}" but no prior step declares it as a write. ` +
-              `This may be populated by the trigger payload — verify manually.`
+              `[WorkflowFactory] Step "${step.key}" reads "${key}" but no prior step declares it as a write — ` +
+              `verify it is provided by the trigger payload.`
             );
           }
         }

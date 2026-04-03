@@ -6,6 +6,7 @@ import type { IToolRegistry } from "../tools/registry";
 import type { ToolAction } from "../tools/base";
 import type { LLMActionResolver } from "../llm/LLMActionResolver";
 import type { UsageLogger } from "../persistence/UsageLogger";
+import type { ToolFailureLogger } from "../persistence/ToolFailureLogger";
 
 // ─────────────────────────────────────────────────────────────
 // LLMStepAction — produces an FSM Action for a single workflow step.
@@ -30,19 +31,22 @@ export class LLMStepAction {
   private readonly _registry: IToolRegistry;
   private readonly _resolver: LLMActionResolver;
   private readonly _usageLogger?: UsageLogger;
+  private readonly _failureLogger?: ToolFailureLogger;
 
   constructor(
     stepDef: StepDefinition,
     workflowId: string,
     registry: IToolRegistry,
     resolver: LLMActionResolver,
-    usageLogger?: UsageLogger
+    usageLogger?: UsageLogger,
+    failureLogger?: ToolFailureLogger
   ) {
     this._stepDef = stepDef;
     this._workflowId = workflowId;
     this._registry = registry;
     this._resolver = resolver;
     this._usageLogger = usageLogger;
+    this._failureLogger = failureLogger;
   }
 
   // triggerFromStateKey: when this action is reached via an external event (e.g.
@@ -50,7 +54,7 @@ export class LLMStepAction {
   // canBeInvoked matches the state the task is actually in when the event arrives.
   buildAction(actionKey: string, triggerFromStateKey?: string): Action {
     const stepDef = this._stepDef;
-    const isTerminal = stepDef.transitions.every((t) => t.nextStep === "end");
+    const isTerminal = stepDef.transitions.length > 0 && stepDef.transitions.every((t) => t.nextStep === "end");
     const validStateKey = triggerFromStateKey ?? stepDef.key;
 
     return new Action(
@@ -91,13 +95,16 @@ export class LLMStepAction {
     if (this._stepDef.toolKey) {
       resolvedToolKey = this._stepDef.toolKey;
       resolvedArgs = {};
+      console.log(`[LLMStepAction] step="${this._stepDef.key}" deterministic tool="${resolvedToolKey}"`);
     } else {
+      console.log(`[LLMStepAction] step="${this._stepDef.key}" resolving tool (${candidateTools.map(t => t.key).join(", ")})…`);
       ({ toolKey: resolvedToolKey, args: resolvedArgs, inputTokens, outputTokens } =
         await this._resolver.resolve({
           stepDescription: this._stepDef.description,
           state,
           candidateTools,
         }));
+      console.log(`[LLMStepAction] step="${this._stepDef.key}" resolved tool="${resolvedToolKey}"`);
 
       this._usageLogger?.append({
         timestamp: new Date().toISOString(),
@@ -119,12 +126,47 @@ export class LLMStepAction {
       };
     }
 
-    const toolResult = await this._executeWithRetry(tool, resolvedArgs, state);
+    // Merge compile-time params (e.g. folder_id from skill definition) into resolved args.
+    // params take lower priority than LLM-resolved args so runtime values can override.
+    const finalArgs = { ...this._stepDef.params, ...resolvedArgs };
+
+    // Pre-execution validation: check required args before making any API call.
+    const missingArgs = this._validateArgs(tool, finalArgs, state);
+    if (missingArgs.length > 0) {
+      const message = `Missing required args: ${missingArgs.join(", ")}`;
+      this._failureLogger?.logArgError({
+        workflowId: this._workflowId,
+        stepKey: this._stepDef.key,
+        toolKey: resolvedToolKey,
+        message,
+        missingArgs,
+      });
+      return {
+        success: false,
+        message,
+        data: { failureKind: "arg_error" },
+        cost: 0,
+        new_state: state,
+      };
+    }
+
+    console.log(`[LLMStepAction] step="${this._stepDef.key}" executing "${resolvedToolKey}"…`);
+    const toolResult = await this._executeWithRetry(tool, finalArgs, state);
+    console.log(`[LLMStepAction] step="${this._stepDef.key}" tool="${resolvedToolKey}" success=${toolResult.success} msg="${toolResult.message}"`);
 
     if (!toolResult.success) {
+      if (toolResult.failureKind === "tool_error") {
+        this._failureLogger?.logToolError({
+          workflowId: this._workflowId,
+          stepKey: this._stepDef.key,
+          toolKey: resolvedToolKey,
+          message: toolResult.message ?? "Tool failed",
+        });
+      }
       return {
         success: false,
         message: toolResult.message ?? `[LLMStepAction] Tool "${resolvedToolKey}" failed`,
+        data: toolResult.failureKind ? { failureKind: toolResult.failureKind } : undefined,
         cost: toolResult.cost ?? 0,
         new_state: state,
       };
@@ -173,8 +215,8 @@ export class LLMStepAction {
         const result = await tool.execute(args, state);
         if (result.success) return result;
         lastResult = result;
-        // Non-retryable: tool ran and explicitly reported failure (e.g. missing args, dedup skip)
-        if (result.cost === 0) return result;
+        // Non-retryable: intentional skip or arg error — retry will not help
+        if (result.failureKind === "skip" || result.failureKind === "arg_error") return result;
       } catch (err) {
         lastResult = {
           success: false,
@@ -190,7 +232,24 @@ export class LLMStepAction {
         await new Promise((r) => setTimeout(r, delayMs));
       }
     }
-    return lastResult!;
+    return lastResult ?? { success: false, message: "No attempts made", cost: 0 };
+  }
+
+  // Returns the names of required args that are missing before tool execution.
+  // Checks state.data for source="state" args (using stateKeys if declared),
+  // and the resolved args map for source="llm" and source="params" args.
+  private _validateArgs(tool: ToolAction, args: Record<string, unknown>, state: IState): string[] {
+    if (!tool.inputSchema) return [];
+    return tool.inputSchema
+      .filter((def) => def.required)
+      .filter((def) => {
+        if (def.source === "state") {
+          const keys = def.stateKeys ?? [def.name];
+          return !keys.some((k) => state.data[k] != null);
+        }
+        return args[def.name] == null;
+      })
+      .map((def) => def.name);
   }
 
   private _selectTransition(result: IToolExecutionResult): TransitionDefinition {
@@ -206,7 +265,7 @@ export class LLMStepAction {
     console.warn(
       `[LLMStepAction] No transition matched for step "${this._stepDef.key}" — using first transition`
     );
-    return this._stepDef.transitions[0];
+    return this._stepDef.transitions[0]!;
   }
 
   private _evaluateCondition(
