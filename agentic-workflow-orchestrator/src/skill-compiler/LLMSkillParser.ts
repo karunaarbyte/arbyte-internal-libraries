@@ -32,10 +32,13 @@ export class LLMSkillParser {
   ];
 
   async parse(skillFileContent: string, stableFileId?: string): Promise<WorkflowDefinition | null> {
-    const availableToolKeys = this._registry.getAll().map((t) => t.key);
+    const toolSummaries = this._registry.getAll().map((t) => ({
+      key: t.key,
+      outputFields: t.outputFields,
+    }));
 
     const response = await this._client.complete<WorkflowDefinition & { error?: string }>({
-      systemPrompt: buildSkillCompilerPrompt(availableToolKeys, LLMSkillParser.TRIGGER_EVENT_KEYS, stableFileId),
+      systemPrompt: buildSkillCompilerPrompt(toolSummaries, LLMSkillParser.TRIGGER_EVENT_KEYS, stableFileId),
       messages: [{ role: "user", content: skillFileContent }],
       jsonMode: true,
     });
@@ -45,9 +48,32 @@ export class LLMSkillParser {
       return null;
     }
 
-    this._validate(response.data);
+    const def = response.data;
+    if (Array.isArray(def.steps)) {
+      for (const step of def.steps) {
+        if (!Array.isArray(step.allowedTools)) step.allowedTools = [];
+        // core.draft_text always requires LLM-generated args — strip toolKey if compiler emitted it
+        if (step.toolKey === "core.draft_text") step.toolKey = undefined;
+        // Ensure params is a plain object or absent
+        if (step.params !== undefined && (typeof step.params !== "object" || Array.isArray(step.params)))
+          step.params = undefined;
+        if (!Array.isArray(step.reads)) step.reads = undefined;
+        if (!Array.isArray(step.writes)) step.writes = undefined;
 
-    return response.data;
+        // Do not auto-infer transitions — missing or wrong transitions must fail validation.
+        // Auto-inference silently wires the wrong control flow for branching or externally-gated steps.
+      }
+    }
+
+    try {
+      this._validate(def);
+    } catch (err) {
+      console.error("[LLMSkillParser] Validation failed:", err instanceof Error ? err.message : err);
+      console.error("[LLMSkillParser] LLM output was:", JSON.stringify(def, null, 2));
+      return null;
+    }
+
+    return def;
   }
 
   private _validate(def: WorkflowDefinition): void {
@@ -69,8 +95,8 @@ export class LLMSkillParser {
 
     for (const step of def.steps) {
       if (!step.key) throw new Error("[LLMSkillParser] Step missing key");
-      if (!Array.isArray(step.transitions))
-        throw new Error(`[LLMSkillParser] Step "${step.key}" missing transitions`);
+      if (!Array.isArray(step.transitions) || step.transitions.length === 0)
+        throw new Error(`[LLMSkillParser] Step "${step.key}" has no transitions — every step must declare at least one`);
 
       if (!Array.isArray(step.allowedTools))
         throw new Error(`[LLMSkillParser] Step "${step.key}" allowedTools must be an array`);
